@@ -1,5 +1,5 @@
 streamlit
-torch
 transformers
-faiss-cpu
+sentence-transformers
+scikit-learn
 numpy

@@ -1,78 +1,150 @@
 import streamlit as st
 import os
 import json
-import faiss
-import torch
 import numpy as np
-from typing import List, Dict, Any
+import tempfile
 from datetime import datetime
-from transformers import AutoTokenizer, AutoModel, pipeline
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import pipeline
 
-class MagicalAIAgent:
-    # Your existing MagicalAIAgent class here (same as in magical_ai.py)
-    # ... [copy the entire class implementation from the original code]
-    def __init__(self, embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2", 
-                 llm_model_name: str = "google/flan-t5-base",
-                 storage_dir: str = "magical_scrolls"):
-        """
-        Initialize the Magical AI Agent with its crystal ball and spellbooks.
-        
-        Args:
-            embedding_model_name: Model used for creating vector embeddings
-            llm_model_name: Model used for generating responses
-            storage_dir: Directory to store indexed knowledge
-        """
+class SimpleMagicalAIAgent:
+    def __init__(self):
+        """Initialize a simplified version of the Magical AI Agent for cloud deployment"""
         with st.spinner("🧙 Initializing your magical AI agent..."):
-            # Set up storage directories
-            self.storage_dir = storage_dir
-            self.vector_dir = os.path.join(storage_dir, "vectors")
-            self.content_dir = os.path.join(storage_dir, "content")
+            # Use a smaller embedding model suitable for cloud deployment
+            self.embedding_model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
             
-            for directory in [self.storage_dir, self.vector_dir, self.content_dir]:
-                os.makedirs(directory, exist_ok=True)
+            # Use a small LLM
+            self.llm = pipeline(
+                "text2text-generation", 
+                model="google/flan-t5-small", 
+                max_length=512
+            )
             
-            # Load the embedding model (the vector spell)
-            self.embedding_model_name = embedding_model_name
-            self.tokenizer = AutoTokenizer.from_pretrained(embedding_model_name)
-            self.model = AutoModel.from_pretrained(embedding_model_name)
-            
-            # Load the language model (the magical cauldron)
-            self.llm = pipeline("text2text-generation", model=llm_model_name, max_length=512)
-            
-            # Initialize the knowledge crystal ball
-            self.initialize_crystal_ball()
-            
-            # Keep track of all scrolls
+            # Initialize empty knowledge base
+            self.documents = []
+            self.embeddings = []
             self.scroll_registry = {}
-            self.load_scroll_registry()
+    
+    def embed_text(self, text):
+        """Create an embedding for the text"""
+        return self.embedding_model.encode(text)
+    
+    def learn_from_scroll(self, scroll_path):
+        """Learn from a JSON file"""
+        st.info(f"Reading magical scroll: {os.path.basename(scroll_path)}")
+        
+        try:
+            with open(scroll_path, 'r', encoding='utf-8') as f:
+                scroll_data = json.load(f)
+            
+            # Process each document
+            if isinstance(scroll_data, list):
+                documents = scroll_data
+            else:
+                documents = [scroll_data]
+            
+            # Add timestamp and source to each document
+            for doc in documents:
+                if "source" not in doc:
+                    doc["source"] = os.path.basename(scroll_path)
+                doc["indexed_at"] = datetime.now().isoformat()
+                
+                # Create embedding
+                if "content" in doc:
+                    text_to_embed = doc["content"]
+                    if "title" in doc:
+                        text_to_embed = f"{doc['title']}: {text_to_embed}"
+                elif "title" in doc:
+                    text_to_embed = doc["title"]
+                else:
+                    text_to_embed = json.dumps(doc)
+                
+                # Store the document and its embedding
+                embedding = self.embed_text(text_to_embed)
+                self.documents.append(doc)
+                self.embeddings.append(embedding)
+            
+            # Update the scroll registry
+            self.scroll_registry[os.path.basename(scroll_path)] = {
+                "doc_count": len(documents),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            st.success(f"✨ Successfully learned {len(documents)} new pieces of knowledge")
+            
+        except Exception as e:
+            st.error(f"Failed to read the magical scroll: {str(e)}")
+    
+    def answer_question(self, question, top_k=3):
+        """Answer a question using the knowledge base"""
+        if len(self.documents) == 0:
+            return "I haven't learned from any magical scrolls yet. Please provide me with some knowledge first!"
+        
+        # Create embedding for the question
+        question_embedding = self.embed_text(question)
+        
+        # Calculate similarities
+        similarities = cosine_similarity(
+            [question_embedding], 
+            self.embeddings
+        )[0]
+        
+        # Get top_k most similar documents
+        top_indices = np.argsort(similarities)[-top_k:][::-1]
+        
+        # Retrieve the most relevant documents
+        relevant_docs = [self.documents[i] for i in top_indices]
+        
+        # Format context for the LLM
+        context = ""
+        for i, doc in enumerate(relevant_docs, 1):
+            if "title" in doc and "content" in doc:
+                context += f"Document {i} - {doc['title']}:\n{doc['content']}\n\n"
+            elif "content" in doc:
+                context += f"Document {i}:\n{doc['content']}\n\n"
+            else:
+                context += f"Document {i}:\n{json.dumps(doc, indent=2)}\n\n"
+        
+        # Construct prompt for the LLM
+        prompt = f"""Based on the following information, please answer the question.
+        
+Information:
+{context}
 
-    # Rest of your MagicalAIAgent methods go here
+Question: {question}
 
-# Streamlit app
+Answer:"""
+        
+        # Generate response
+        response = self.llm(prompt)[0]['generated_text']
+        
+        return response
+
+# Set up the Streamlit page
 st.set_page_config(page_title="Magical AI Agent", page_icon="🧙")
 st.title("🧙 Magical AI Agent")
 st.write("Upload JSON files to teach me new knowledge, then ask me questions!")
 
 # Initialize session state
 if 'agent' not in st.session_state:
-    with st.spinner("Initializing your magical assistant..."):
-        st.session_state.agent = MagicalAIAgent()
-        st.session_state.message_history = []
+    st.session_state.agent = SimpleMagicalAIAgent()
+    st.session_state.message_history = []
 
 # File uploader for JSON files
 uploaded_file = st.file_uploader("Upload a JSON scroll", type=["json"])
 if uploaded_file is not None:
-    # Save the uploaded file temporarily
-    temp_file_path = os.path.join("temp_uploads", uploaded_file.name)
-    os.makedirs("temp_uploads", exist_ok=True)
+    # Create a temporary file
+    temp_dir = tempfile.mkdtemp()
+    temp_path = os.path.join(temp_dir, uploaded_file.name)
     
-    with open(temp_file_path, "wb") as f:
+    with open(temp_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     
+    # Learn from the temporary file
     with st.spinner("Learning from your magical scroll..."):
-        st.session_state.agent.learn_from_scroll(temp_file_path)
-    
-    st.success(f"Successfully learned from {uploaded_file.name}!")
+        st.session_state.agent.learn_from_scroll(temp_path)
 
 # Chat interface
 st.subheader("Ask the Magical AI")
@@ -85,8 +157,8 @@ if user_question:
     # Add to message history
     st.session_state.message_history.append({"question": user_question, "answer": answer})
     
-    # Clear the input box
-    st.experimental_rerun()
+    # Reset the input field
+    st.text_input("Your question:", value="", key=f"question_{len(st.session_state.message_history)}")
 
 # Display message history
 for message in st.session_state.message_history:
